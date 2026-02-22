@@ -93,6 +93,8 @@ def process_path(result: list[tuple], start: str, end: str,
         last_detail = con[4]
 
     every_route_time = []
+    last_x = None
+    last_z = None
     for x in path:
         station_1 = station_num_to_id(data, x[0])
         station_2 = station_num_to_id(data, x[1])
@@ -102,24 +104,24 @@ def process_path(result: list[tuple], start: str, end: str,
         if route in data['routes']:
             # EVERYTHING IS FOR THIS UGLY FORMAT
             route_stations = []
-            route_platforms = []
+            route_details = []
             for route_current in data['routes'][route]['stations']:
                 route_stations.append(route_current['id'])
-                route_platforms.append(route_current['name'])
+                route_details.append(route_current)
             indices = find_shortest_sublist_indices(route_stations, station_1, station_2)
             route_stations = route_stations[indices[0]:indices[-1]+1]
-            route_platforms = route_platforms[indices[0]:indices[-1]+1]
+            route_details = route_details[indices[0]:indices[-1]+1]
             if len(every_route_time) > 0:
                 # Go to the platform first
                 if every_route_time[-1]['routeId'] == "":
-                    every_route_time[-1]['endPlatformName'] = route_platforms[0]
-                elif every_route_time[-1]['endPlatformName'] != route_platforms[0]:
+                    every_route_time[-1]['endPlatformName'] = route_details[0]['name']
+                elif every_route_time[-1]['endPlatformName'] != route_details[0]['name'] or (last_x and last_z and (route_details[0]['x'] != last_x or route_details[0]['z'] != last_z)):
                     every_route_time.append({
                         "routeId": "",
                         "startStationId": every_route_time[-1]['endStationId'],
                         "endStationId": route_stations[0],
                         "startPlatformName": every_route_time[-1]['endPlatformName'],
-                        "endPlatformName": route_platforms[0],
+                        "endPlatformName": route_details[0]['name'],
                         "startTime": every_route_time[-1]['endTime'],
                         "endTime": timestamp,
                         "walkingDistance": 0,
@@ -130,13 +132,15 @@ def process_path(result: list[tuple], start: str, end: str,
                     "routeId": route,
                     "startStationId": route_stations[y],
                     "endStationId": route_stations[y+1],
-                    "startPlatformName": route_platforms[y],
-                    "endPlatformName": route_platforms[y+1],
+                    "startPlatformName": route_details[y]['name'],
+                    "endPlatformName": route_details[y+1]['name'],
                     "startTime": timestamp,
                     "endTime": timestamp,
                     "walkingDistance": 0,
                 })
             every_route_time[-1]['endTime'] = get_timestamp_from_seconds(x[3])
+            last_x = route_details[-1]['x']
+            last_z = route_details[-1]['z']
         else:
             if route[:4] == "出站换乘":
                 distance = route[12:-1]
@@ -150,8 +154,10 @@ def process_path(result: list[tuple], start: str, end: str,
                 "endPlatformName": "",
                 "startTime": timestamp,
                 "endTime": get_timestamp_from_seconds(x[3]),
-                "walkingDistance": round(route)}
+                "walkingDistance": round(distance)}
             )
+            last_x = None
+            last_z = None
 
     if len(every_route_time) > 0:
         # Go to destination at last

@@ -17,7 +17,7 @@ MAX_HOUR: int = 3
 MAX_WILD_BLOCKS: int = 1500
 TRANSFER_ADDITION: dict[str, list[str]] = {}
 WILD_ADDITION: dict[str, list[str]] = {}
-ORIGINAL_IGNORED_LINES: list = ["15765905_花越綫|Hana-Koshi Line_[各停]|[Local]", "15765905_花越綫|Hana-Koshi Line_[快速]|[Rapid]", "15765905_花越綫|Hana-Koshi Line_"]
+ORIGINAL_IGNORED_LINES: list = ["15765905_花越綫|Hana-Koshi Line|[ Closed]_[各停]|[Local]", "15765905_花越綫|Hana-Koshi Line|[Closed]_[各停]|[Local]", "15765905_花越綫|Hana-Koshi Line|[Closed]_[快速]|[Rapid]", "15765905_花越綫|Hana-Koshi Line|[Closed]_"]
 #ORIGINAL_IGNORED_LINES: list = []
 
 # 出发时间（秒，0-86400），默认值为None，即当前时间后10秒
@@ -59,20 +59,20 @@ def get_seconds_since_midnight():
 async def root(raw_data: str = Body(..., media_type="text/plain")):
     directions = []
     sec = get_seconds_since_midnight()
-    try:
-        json_data = json.loads(raw_data)
-        direction = Direction(**json_data)
-        directions = find_path(direction.startStationId, direction.endStationId, LINK, LOCAL_FILE_PATH, DEP_PATH,
-                  MAX_WILD_BLOCKS, TRANSFER_ADDITION, WILD_ADDITION, ORIGINAL_IGNORED_LINES,
-                  False, False,
-                  direction.ignoredLines, direction.avoidStations, not direction.noHSR,
-                  not direction.noBoats, direction.enableWalkingWild, direction.onlyLightRail,
-                  False, MAX_HOUR, departure_time=sec, in_theory=direction.inTheory)
-    except:
-        pass
+    #try:
+    json_data = json.loads(raw_data)
+    direction = Direction(**json_data)
+    directions = find_path(direction.startStationId, direction.endStationId, LINK, LOCAL_FILE_PATH, DEP_PATH,
+              MAX_WILD_BLOCKS, TRANSFER_ADDITION, WILD_ADDITION, ORIGINAL_IGNORED_LINES,
+              False, False,
+              direction.ignoredLines, direction.avoidStations, not direction.noHSR,
+              not direction.noBoats, direction.enableWalkingWild, direction.onlyLightRail,
+              False, MAX_HOUR, departure_time=sec, in_theory=direction.inTheory)
+    #except:
+    #    pass
     return {
         "code": 200,
-        "currentTime": round(time.time() * 1000),
+        "currentTime": int(time.time() * 1000),
         "text": "OK - pathfinder_api",
         "version": 1,
         "data": {
