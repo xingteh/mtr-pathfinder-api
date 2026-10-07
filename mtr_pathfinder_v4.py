@@ -4,14 +4,11 @@ Find paths between two stations for Minecraft Transit Railway.
 
 from array import array
 from datetime import datetime, timedelta, timezone
-from difflib import SequenceMatcher
 from enum import Enum
-from io import BytesIO
 from math import gcd, sqrt
 from operator import itemgetter
 from time import gmtime, strftime, time
-from typing import Any, Optional, Dict, Literal, Tuple, List, Union
-import base64
+from typing import Optional, Union
 import hashlib
 import json
 import mmap
@@ -19,9 +16,7 @@ import os
 import pickle
 import re
 
-from fontTools.ttLib import TTFont
-from opencc import OpenCC
-from PIL import Image, ImageDraw, ImageFont
+import datetime as dt
 import requests
 
 CACHE_VERSION = '130'
@@ -30,113 +25,6 @@ MAX_INT = 2 ** 64 - 1
 RUNNING_SPEED: float = 5.612          # 站内换乘速度，单位 block/s
 TRANSFER_SPEED: float = 4.317         # 出站换乘速度，单位 block/s
 WILD_WALKING_SPEED: float = 2.25      # 非出站换乘（越野）速度，单位 block/s
-
-opencc1 = OpenCC('s2t')
-opencc2 = OpenCC('t2jp')
-opencc3 = OpenCC('t2s')
-opencc4 = OpenCC('jp2t')
-
-
-def get_close_matches(words, possibilities, cutoff=0.2):
-    result = [(-1, None)]
-    s = SequenceMatcher()
-    for word in words:
-        s.set_seq2(word)
-        for x, y in possibilities:
-            s.set_seq1(x)
-            if s.real_quick_ratio() >= cutoff and \
-                    s.quick_ratio() >= cutoff:
-                ratio = s.ratio()
-                if ratio >= cutoff:
-                    result.append((ratio, y))
-
-    return max(result)[1]
-
-
-# From https://github.com/TrueMyst/PillowFontFallback/blob/main/fontfallback/writing.py
-def load_fonts(*font_paths: str) -> Dict[str, TTFont]:
-    """
-    Loads font files specified by paths into memory and returns a dictionary of font objects.
-    """
-    fonts = {}
-    for path in font_paths:
-        font = TTFont(path)
-        fonts[path] = font
-    return fonts
-
-
-# From https://github.com/TrueMyst/PillowFontFallback/blob/main/fontfallback/writing.py
-def has_glyph(font: TTFont, glyph: str) -> bool:
-    """
-    Checks if the given font contains a glyph for the specified character.
-    """
-    for table in font["cmap"].tables:
-        if table.cmap.get(ord(glyph)):
-            return True
-    return False
-
-
-# From https://github.com/TrueMyst/PillowFontFallback/blob/main/fontfallback/writing.py
-def merge_chunks(text: str, fonts: Dict[str, TTFont]) -> List[List[str]]:
-    """
-    Merges consecutive characters with the same font into clusters, optimizing font lookup.
-    """
-    chunks = []
-
-    for char in text:
-        for font_path, font in fonts.items():
-            if has_glyph(font, char):
-                chunks.append([char, font_path])
-                break
-
-    cluster = chunks[:1]
-
-    for char, font_path in chunks[1:]:
-        if cluster[-1][1] == font_path:
-            cluster[-1][0] += char
-        else:
-            cluster.append([char, font_path])
-
-    return cluster
-
-
-# From https://github.com/TrueMyst/PillowFontFallback/blob/main/fontfallback/writing.py
-def draw_text_v2(
-    draw: ImageDraw.ImageDraw,
-    xy: Tuple[int, int],
-    text: str,
-    color: Tuple[int, int, int],
-    fonts: Dict[str, TTFont],
-    size: int,
-    anchor: Optional[str] = None,
-    align: Literal["left", "center", "right"] = "left",
-    direction: Literal["rtl", "ltr", "ttb"] = "ltr",
-) -> None:
-    """
-    Draws text on an image at given coordinates, using specified size, color, and fonts.
-    """
-
-    y_offset = 0
-    sentence = merge_chunks(text, fonts)
-
-    for words in sentence:
-        xy_ = (xy[0] + y_offset, xy[1] - 6)
-
-        font = ImageFont.truetype(words[1], size)
-        draw.text(
-            xy=xy_,
-            text=words[0],
-            fill=color,
-            font=font,
-            anchor=anchor,
-            align=align,
-            direction=direction,
-            embedded_color=True,
-        )
-
-        # draw.text
-        box = font.getbbox(words[0])
-        y_offset += box[2] - box[0]
 
 
 # From https://github.com/trainline-eu/csa-challenge/blob/2aa0fa55e466692d404d87aa2dcaf5b83bca5920/csa.py
@@ -373,14 +261,8 @@ def fetch_data(link: str, LOCAL_FILE_PATH, MAX_WILD_BLOCKS,
 
             data_new['transfer_dist'][x][y] = distance
 
-    if need_input is True:
-        y = input(f'是否替换{LOCAL_FILE_PATH}文件? (Y/N) ').lower()
-    else:
-        y = 'y'
-
-    if y == 'y':
-        with open(LOCAL_FILE_PATH, 'w', encoding='utf-8') as f:
-            json.dump(data_new, f)
+    with open(LOCAL_FILE_PATH, 'w', encoding='utf-8') as f:
+        json.dump(data_new, f)
 
     return data_new
 
@@ -406,166 +288,22 @@ def gen_departure(link: str, DEP_PATH, need_input=True) -> None:
         dep_list = list(sorted(dep_list))
         dep_dict[x['id']] = dep_list
 
-    if need_input is True:
-        y = input(f'是否替换{DEP_PATH}文件? (Y/N) ').lower()
-    else:
-        y = 'y'
-
-    if y == 'y':
-        with open(DEP_PATH, 'w', encoding='utf-8') as f:
-            json.dump(dep_dict, f)
+    with open(DEP_PATH, 'w', encoding='utf-8') as f:
+        json.dump(dep_dict, f)
 
 
-def station_name_to_id(data: dict, sta: str, STATION_TABLE,
-                       fuzzy_compare=True) -> Optional[str]:
-    '''
-    Convert one station's name to its ID.
-    '''
-    sta = sta.lower()
-    if sta in STATION_TABLE:
-        sta = STATION_TABLE[sta]
-
-    tra1 = opencc1.convert(sta)
-    sta_try = [sta, tra1, opencc2.convert(tra1)]
-
-    all_names = []
-    stations = data['stations']
-    output = None
-    has_station = False
-    for station_id, station_dict in stations.items():
-        s_1 = station_dict['name']
-        all_names.append((s_1, station_id))
-        s_split = station_dict['name'].split('|')
-        s_2_2 = s_split[-1]
-        s_2 = s_2_2.split('/')[-1]
-        s_3 = s_split[0]
-        for st in sta_try:
-            if st in (s_1.lower(), s_2.lower(), s_2_2.lower(), s_3.lower()):
-                has_station = True
-                output = station_id
-                break
-
-    if has_station is False and fuzzy_compare is True:
-        return get_close_matches(sta_try, all_names)
-
-    return output
-
-
-def station_num_to_name(data: dict, sta: str) -> str:
+def station_num_to_id(data: dict, sta: str) -> str:
     '''
     Convert one station's code (str of base-10 int) to its name.
     '''
     sta = hex(int(sta))[2:]
     for station in data['stations'].values():
         if station['station'] == sta:
-            return station['name']
+            return station['id']
 
 
 def sta_id(station: str) -> int:
     return int('0x' + station, 16)
-
-
-def route_name_to_id(data_v4: dict, route_name: str, name=False) -> list[str]:
-    '''
-    Convert one route's name to the IDs/names of its possible matches.
-    '''
-    for route_id, route_data in data_v4['routes'].items():
-        if route_name == route_id:
-            return [route_id] if name is not True else [route_data['name']]
-
-    route_name = route_name.lower()
-    result = []
-    for route in data_v4['routes'].values():
-        if name is True:
-            output: str = route['name']
-        else:
-            output: str = route['id']
-
-        n: str = route['name']
-        number: str = route['number']
-        route_names = [n, n.split('|')[0]]
-        if ('||' in n and n.count('|') > 2) or \
-                ('||' not in n and n.count('|') > 0):
-            eng_name = n.split('|')[1].split('|')[0]
-            if eng_name != '':
-                route_names.append(eng_name)
-
-        if number not in ['', ' ']:
-            for tmp_name in route_names[1:]:
-                route_names.append(tmp_name + ' ' + number)
-
-        for x in route_names:
-            x = x.lower().strip()
-            if x == route_name:
-                result.append(output)
-                continue
-
-            if x.isascii():
-                continue
-
-            simp1 = opencc3.convert(x)
-            if simp1 == route_name:
-                result.append(output)
-                continue
-
-            simp2 = opencc3.convert(opencc4.convert(x))
-            if simp2 == route_name:
-                result.append(output)
-                continue
-
-    return result
-
-
-def check_route_name(route_data, IGNORED_LINES: list[str],
-                     ONLY_LINES: Optional[list[str]] = None):
-    if ONLY_LINES is None:
-        ONLY_LINES = []
-
-    if ONLY_LINES:
-        IGNORED_LINES = []
-
-    lines_to_check = [x.lower().strip()
-                      for x in IGNORED_LINES + ONLY_LINES if x != '']
-    n: str = route_data['name']
-    if n.lower().strip() in lines_to_check:
-        return bool(IGNORED_LINES)
-
-    number: str = route_data['number']
-    route_names = [n, n.split('|')[0], n.split('||')[0]]
-    if ('||' in n and n.count('|') > 2) or \
-            ('||' not in n and n.count('|') > 0):
-        eng_name = n.split('|')[1].split('|')[0]
-        if eng_name != '':
-            route_names.append(eng_name)
-
-    if number not in ['', ' ']:
-        for tmp_name in route_names[1:]:
-            route_names.append(tmp_name + ' ' + number)
-
-    cont = False
-    for x in route_names:
-        x = x.lower().strip()
-        if x in lines_to_check:
-            cont = True
-            break
-
-        if x.isascii():
-            continue
-
-        simp1 = opencc3.convert(x)
-        if simp1 in lines_to_check:
-            cont = True
-            break
-
-        simp2 = opencc3.convert(opencc4.convert(x))
-        if simp2 in lines_to_check:
-            cont = True
-            break
-
-    if ONLY_LINES:
-        cont = not cont
-
-    return cont
 
 
 def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
@@ -574,7 +312,7 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
                   AVOID_STATIONS: list, route_type: RouteType,
                   original_ignored_lines: list[str], DEP_PATH: str,
                   version1: str, version2: str,
-                  STATION_TABLE, WILD_ADDITION, TRANSFER_ADDITION
+                  WILD_ADDITION, TRANSFER_ADDITION
                   ) -> dict[str, list[tuple]]:
     '''
     Generate the timetable of all routes.
@@ -601,9 +339,6 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
 
             return tt_dict
 
-    avoid_ids = [station_name_to_id(data, x, STATION_TABLE)
-                 for x in AVOID_STATIONS]
-
     # 添加普通路线
     tt_dict = {}
     for route_id in dep_data.keys():
@@ -612,7 +347,7 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
 
         route = data['routes'][route_id]
         # 禁路线
-        if check_route_name(route, IGNORED_LINES, ONLY_LINES) is True:
+        if route_id in IGNORED_LINES:
             continue
 
         if (not CALCULATE_HIGH_SPEED) and route['type'] == 'train_high_speed':
@@ -660,10 +395,10 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
             if station1 == station2:
                 continue
 
-            if _station2 in avoid_ids:
+            if _station2 in AVOID_STATIONS:
                 continue
 
-            if _station1 not in avoid_ids and _station2 not in avoid_ids:
+            if _station1 not in AVOID_STATIONS and _station2 not in AVOID_STATIONS:
                 tt.append((sta_id(station1), sta_id(station2),
                            dep_time, arr_time,
                            [route_id, route['stations'][-1]['id'], platform]))
@@ -671,9 +406,9 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
             # 添加出站换乘
             connections = data['stations'][_station2]['connections']
             if _station2 in TRANSFER_ADDITION:
-                connections += data['stations'][TRANSFER_ADDITION[_station2]]
+                connections += TRANSFER_ADDITION[_station2]
             for con in connections:
-                if con in avoid_ids:
+                if con in AVOID_STATIONS:
                     continue
 
                 if _station2 not in data['transfer_time']:
@@ -687,7 +422,7 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
                 con = data['stations'][con]['station']
                 tt.append((sta_id(station2), sta_id(con),
                            arr_time, arr_time + t2,
-                           [f'出站换乘步行 Walk {round(dist, 2)}m', '', None]))
+                           [f'w{round(dist, 2)}', '', None]))
 
             if CALCULATE_WALKING_WILD is True:
                 # 添加非出站换乘（越野）
@@ -697,7 +432,7 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
 
                 transfer = data['transfer_time'].get(_station2, {})
                 for con in connections:
-                    if con in avoid_ids:
+                    if con in AVOID_STATIONS:
                         continue
 
                     if con not in transfer:
@@ -708,7 +443,7 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
                     con = data['stations'][con]['station']
                     tt.append((sta_id(station2), sta_id(con),
                                arr_time, arr_time + t2,
-                               [f'步行 Walk {round(dist, 2)}m', '', None]))
+                               [f'w{round(dist, 2)}', '', None]))
 
         tt_dict[route_id] = tt
 
@@ -727,7 +462,7 @@ def gen_timetable(data: dict, IGNORED_LINES: list[str], ONLY_LINES: list[str],
 
 
 def gen_all_caches(original_ignored_lines: list[str], LOCAL_FILE_PATH,
-                   DEP_PATH, STATION_TABLE, WILD_ADDITION, TRANSFER_ADDITION):
+                   DEP_PATH, WILD_ADDITION, TRANSFER_ADDITION):
     with open(LOCAL_FILE_PATH, encoding='utf-8') as f:
         data = json.load(f)
 
@@ -740,52 +475,50 @@ def gen_all_caches(original_ignored_lines: list[str], LOCAL_FILE_PATH,
     gen_timetable(data, IGNORED_LINES, [], True, True, False, False, [],
                   RouteType.REAL_TIME, original_ignored_lines,
                   DEP_PATH, version1, version2,
-                  STATION_TABLE, WILD_ADDITION, TRANSFER_ADDITION)
+                  WILD_ADDITION, TRANSFER_ADDITION)
 
     gen_timetable(data, IGNORED_LINES, [], True, True, True, False, [],
                   RouteType.REAL_TIME, original_ignored_lines,
                   DEP_PATH, version1, version2,
-                  STATION_TABLE, WILD_ADDITION, TRANSFER_ADDITION)
+                  WILD_ADDITION, TRANSFER_ADDITION)
 
     gen_timetable(data, IGNORED_LINES, [], False, True, True, False, [],
                   RouteType.REAL_TIME, original_ignored_lines,
                   DEP_PATH, version1, version2,
-                  STATION_TABLE, WILD_ADDITION, TRANSFER_ADDITION)
+                  WILD_ADDITION, TRANSFER_ADDITION)
 
     gen_timetable(data, IGNORED_LINES, [], False, True, False, False, [],
                   RouteType.REAL_TIME, original_ignored_lines,
                   DEP_PATH, version1, version2,
-                  STATION_TABLE, WILD_ADDITION, TRANSFER_ADDITION)
+                  WILD_ADDITION, TRANSFER_ADDITION)
 
 
 def load_tt(tt_dict: dict[str, list[tuple]], data, start, end,
-            departure_time: int, DEP_PATH, STATION_TABLE, TRANSFER_ADDITION,
+            departure_time: int, DEP_PATH, TRANSFER_ADDITION,
             CALCULATE_WALKING_WILD, WILD_ADDITION, MAX_HOUR):
     with open(DEP_PATH, 'r', encoding='utf-8') as f:
         dep_data: dict[str, list[int]] = json.load(f)
 
     timetable: list[tuple | list] = []
-    start_station = station_name_to_id(data, start, STATION_TABLE)
-    end_station = station_name_to_id(data, end, STATION_TABLE)
-    if not (start_station and end_station):
+    if not (start and end):
         return []
 
     # 添加起点出站换乘
-    ss = data['stations'][start_station]['station']
-    connections = data['stations'][start_station]['connections']
+    ss = data['stations'][start]['station']
+    connections = data['stations'][start]['connections']
     if start in TRANSFER_ADDITION:
         connections += data['stations'][TRANSFER_ADDITION[start]]
     for con in connections:
-        if con not in data['transfer_time'][start_station]:
+        if con not in data['transfer_time'][start]:
             continue
 
-        t2 = round(data['transfer_time'][start_station][con])
-        dist = data['transfer_dist'][start_station][con]
+        t2 = round(data['transfer_time'][start][con])
+        dist = data['transfer_dist'][start][con]
         con = data['stations'][con]['station']
         timetable.append(
             (sta_id(ss), sta_id(con),
              departure_time, departure_time + t2,
-             [f'出站换乘步行 Walk {round(dist, 2)}m', '', None]))
+             [f'w{round(dist, 2)}', '', None]))
 
     if CALCULATE_WALKING_WILD is True:
         # 添加起点非出站换乘（越野）
@@ -793,18 +526,18 @@ def load_tt(tt_dict: dict[str, list[tuple]], data, start, end,
         if start in WILD_ADDITION:
             connections += data['stations'][WILD_ADDITION[start]]
 
-        transfer = data['transfer_time'].get(start_station, {})
+        transfer = data['transfer_time'].get(start, {})
         for con in connections:
             if con not in transfer:
                 continue
 
             t2 = round(transfer[con])
-            dist = data['transfer_dist'][start_station][con]
+            dist = data['transfer_dist'][start][con]
             con = data['stations'][con]['station']
             timetable.append(
                 (sta_id(ss), sta_id(con),
                  departure_time, departure_time + t2,
-                 [f'步行 Walk {round(dist, 2)}m', '', None]))
+                 [f'w{round(dist, 2)}', '', None]))
 
     max_time = departure_time + MAX_HOUR * 60 * 60
     trips: dict[str, dict[str, int]] = {}
@@ -858,17 +591,15 @@ def load_tt(tt_dict: dict[str, list[tuple]], data, start, end,
 
 def process_path(result: list[tuple], start: str, end: str,
                  trips: dict[str, dict[str, int]], data: dict,
-                 detail: bool, STATION_TABLE
+                 detail: bool
                  ) -> Union[list[str, int, int, int, list], tuple]:
     '''
     Process the path, change it into human readable form.
     '''
-    start_station = station_name_to_id(data, start, STATION_TABLE)
-    end_station = station_name_to_id(data, end, STATION_TABLE)
-    if not (start_station and end_station):
+    if not (start and end):
         return None, None, None, None, None
 
-    if start_station == end_station:
+    if start == end:
         return None, None, None, None, None
 
     path = []
@@ -919,284 +650,134 @@ def process_path(result: list[tuple], start: str, end: str,
     stations = data['stations']
     every_route_time = []
     for x in path:
-        station_1 = x[0]
-        station_2 = x[1]
-        sta1_name = station_num_to_name(data, station_1)
-        sta1_id = station_name_to_id(data, sta1_name, {}, False)
-        sta1_name = sta1_name.replace('|', ' ')
-        sta2_name = station_num_to_name(data, station_2)
-        sta2_id = station_name_to_id(data, sta2_name, {}, False)
-        sta2_name = sta2_name.replace('|', ' ')
-        route_name = x[4][0]
-        if route_name in data['routes']:
-            z: dict[str, Any] = data['routes'][route_name]
-            route_name = data['routes'][route_name]['name']
-            route = (z['number'] + ' ' + route_name.split('||')[0]).strip()
-            route = route.replace('|', ' ')
-            terminus_name: str = stations[x[4][1]]['name']
-            if terminus_name.count('|') == 0:
-                t1_name = t2_name = terminus_name
-            else:
-                t1_name = terminus_name.split('|')[0]
-                t2_name = terminus_name.split('|')[1].replace('|', ' ')
+        station_1 = station_num_to_id(data, x[0])
+        station_2 = station_num_to_id(data, x[1])
+        route = x[4][0]
+        timestamp = get_timestamp_from_seconds(x[2])
 
-            if z['circularState'] == 'CLOCKWISE':
-                t1_name = '(顺时针) ' + t1_name
-                t2_name += ' (Clockwise)'
-            elif z['circularState'] == 'ANTICLOCKWISE':
-                t1_name = '(逆时针) ' + t1_name
-                t2_name += ' (Anticlockwise)'
-            terminus = (t1_name, t2_name)
-            i2 = 0
-            sta_ids = [x['id'] for x in z['stations']]
-            while True:
-                try:
-                    sta2_index = sta_ids.index(sta2_id, i2)
-                    i2 = sta2_index + 1
-                    try:
-                        sta1_index = [i for (i, v) in enumerate(sta_ids[:i2])
-                                      if v == sta1_id][-1]
-                    except (IndexError, ValueError):
-                        pass
-                    else:
-                        platform = z['stations'][sta1_index]['name']
-                        break
-
-                except (IndexError, ValueError):
-                    platform = None
-                    break
-
-            color = hex(z['color']).lstrip('0x').rjust(6, '0')
-            train_type = z['type']
+        if route in data['routes']:
+            # EVERYTHING IS FOR THIS UGLY FORMAT
+            route_stations = []
+            route_details = []
+            for station in data['routes'][route]['stations']:
+                route_stations.append(station['id'])
+                route_details.append(station)
+            indices = find_shortest_sublist_indices(route_stations, station_1, station_2)
+            route_stations = route_stations[indices[0]:indices[-1] + 1]
+            route_details = route_details[indices[0]:indices[-1] + 1]
+            if len(every_route_time) > 0:
+                # Go to the platform first
+                if every_route_time[-1]['routeId'] == "":
+                    every_route_time[-1]['endPlatformName'] = route_details[0]['name']
+                elif every_route_time[-1]['endPlatformName'] != route_details[0]['name'] or (
+                        last_x and last_z and (route_details[0]['x'] != last_x or route_details[0]['z'] != last_z)):
+                    every_route_time.append({
+                        "routeId": "",
+                        "startStationId": every_route_time[-1]['endStationId'],
+                        "endStationId": route_stations[0],
+                        "startPlatformName": every_route_time[-1]['endPlatformName'],
+                        "endPlatformName": route_details[0]['name'],
+                        "startTime": every_route_time[-1]['endTime'],
+                        "endTime": timestamp,
+                        "walkingDistance": 0,
+                    })
+            for y in range(len(route_stations) - 1):
+                # Intermediate stations
+                every_route_time.append({
+                    "routeId": route,
+                    "startStationId": route_stations[y],
+                    "endStationId": route_stations[y + 1],
+                    "startPlatformName": route_details[y]['name'],
+                    "endPlatformName": route_details[y + 1]['name'],
+                    "startTime": timestamp,
+                    "endTime": timestamp,
+                    "walkingDistance": 0,
+                })
+            every_route_time[-1]['endTime'] = get_timestamp_from_seconds(x[3])
+            last_x = route_details[-1]['x']
+            last_z = route_details[-1]['z']
         else:
-            color = '000000'
-            route = route_name
-            terminus = (route_name.split('，用时')[0], 'Walk')
-            train_type = None
-            platform = None
+            every_route_time.append({
+                "routeId": "",
+                "startStationId": station_1,
+                "endStationId": station_2,
+                "startPlatformName": every_route_time[-1]['endPlatformName'] if len(every_route_time) > 0 else "",
+                "endPlatformName": "",
+                "startTime": timestamp,
+                "endTime": get_timestamp_from_seconds(x[3]),
+                "walkingDistance": round(float(route[1:]))}
+            )
+            last_x = None
+            last_z = None
 
-        color = '#' + color
-        r = (sta1_name, sta2_name, color, route, terminus,
-             x[2], x[3], train_type, platform, route_name)
-        every_route_time.append(r)
+    if len(every_route_time) > 0:
+        # Go to destination at last
+        every_route_time[-1]['endStationId'] = ""
+        # Go to the station first
+        every_route_time.insert(0, {
+            "routeId": "",
+            "startStationId": "",
+            "endStationId": every_route_time[0]['startStationId'],
+            "startPlatformName": "",
+            "endPlatformName": every_route_time[0]['startPlatformName'],
+            "startTime": every_route_time[0]["startTime"],
+            "endTime": every_route_time[0]["startTime"],
+            "walkingDistance": 0,
+        })
 
     return every_route_time
 
 
-def save_image(route_type: RouteType, every_route_time: list,
-               BASE_PATH, version1, version2,
-               PNG_PATH, departure_time,
-               show=False) -> tuple[Image.Image, str]:
-    '''
-    Save the image of the route.
-    '''
-    pattern = []
-    pattern.append(
-        (ImagePattern.TEXT,
-         str(strftime('%H:%M:%S', gmtime(departure_time)))))  # 出发时间
-    time_img = Image.open(PNG_PATH + os.sep + 'time.png')
-    for route_data in every_route_time:
-        route_img = Image.open(PNG_PATH + os.sep + f'{route_data[7]}.png')
-        terminus = route_data[4][0] + '方向 To ' + route_data[4][1]
+def get_timestamp_from_seconds(seconds, base_datetime=None):
+    """
+    灵活版本，可以指定任意基础时间
 
-        total_time = route_data[6] - route_data[5]
-        time1 = str(strftime('%H:%M:%S', gmtime(route_data[5])))
-        time2 = str(strftime('%H:%M:%S', gmtime(route_data[6])))
-        time3 = str(strftime('%H:%M:%S', gmtime(total_time)))
-        if int(time3.split(':', maxsplit=1)[0]) == 0:
-            time3 = ''.join(time3.split(':', maxsplit=1)[1:])
+    参数:
+    seconds: float - 从基础时间开始的秒数
+    base_datetime: datetime or None - 基础时间，默认为今天的零点
 
-        pattern.append((ImagePattern.STATION, route_data[0],
-                        route_data[2]))  # 车站
-        pattern.append((ImagePattern.TEXT, time1))  # 发车时间
-        pattern.append((ImagePattern.THUMB_TEXT, route_img,
-                        route_data[3]))  # 路线名
-        if route_data[7] is not None:
-            # 正常
-            pattern.append((ImagePattern.GREY_TEXT, terminus))  # 方向
+    返回:
+    int - 毫秒级时间戳
+    """
+    EPOCH = datetime(1970, 1, 1)
+    if base_datetime is None:
+        # 默认为今天零点
+        today = datetime.now(dt.UTC).date()
+        base_datetime = datetime.combine(today, datetime.min.time())
+    elif isinstance(base_datetime, (int, float)):
+        base_datetime = datetime.fromtimestamp(base_datetime / 1000.0, dt.UTC)
 
-        colour = 'grey'
-        pattern.append((ImagePattern.THUMB_TEXT, time_img,
-                        time3, colour))  # 用时
-        pattern.append((ImagePattern.TEXT, time2))  # 到站时间
+    # 直接加上秒数
+    target_datetime = base_datetime + timedelta(seconds=seconds)
 
-    pattern.append((ImagePattern.STATION, route_data[1], route_data[2]))
-    # full_time = every_route_time[-1][6] - every_route_time[0][5]
-    # 总时长从出发时间开始算，不从发车时间开始算
-    full_time = every_route_time[-1][6] - departure_time
-    return generate_image(pattern, route_type, BASE_PATH,
-                          version1, version2, full_time, show)
+    # 转换为毫秒时间戳
+    return int((target_datetime - EPOCH).total_seconds() * 1000)
 
 
-def calculate_height_width(pattern: list[tuple[ImagePattern, str, str]],
-                           route_type, final_str: str,
-                           final_str_size: int, BASE_PATH) -> tuple[int, int]:
-    '''
-    Calculate the width and the height of the image.
-    '''
-    text_size = 20
-    font = ImageFont.truetype(BASE_PATH + os.sep + 'fonts' + os.sep +
-                              'NotoSansKR-Regular.ttf',
-                              size=text_size)
-    font2 = ImageFont.truetype(BASE_PATH + os.sep + 'fonts' + os.sep +
-                               'NotoSansKR-Regular.ttf',
-                               size=final_str_size)
-    route_len_list = [font.getlength(x[1]) + int(x[0].value) for x in pattern
-                      if x[0] not in
-                      [ImagePattern.FAKE_STATION, ImagePattern.OR,
-                       ImagePattern.THUMB_TEXT,
-                       ImagePattern.THUMB_INDENT_TEXT]]
-    route_len_list += [font.getlength(x[2]) + int(x[0].value) for x in pattern
-                       if x[0] in [ImagePattern.THUMB_TEXT,
-                                   ImagePattern.THUMB_INDENT_TEXT]]
-    if route_type != RouteType.IN_THEORY:
-        len_final_str = font2.getlength(final_str) + 40
-        if max(route_len_list) > len_final_str:
-            width = round(max(route_len_list))
-        else:
-            width = round(len_final_str)
-    else:
-        width = round(max(route_len_list))
+def find_shortest_sublist_indices(lst, a, b):
+    last_a = None
+    best = None  # (length, i, j)
 
-    height = (len([x for x in pattern
-                   if x[0] not in [ImagePattern.FAKE_STATION,
-                                   ImagePattern.OR]]) + 1) * 30 + 48 + 10
+    for j, x in enumerate(lst):
+        if x == a:
+            last_a = j
+        elif x == b and last_a is not None:
+            length = j - last_a
+            if best is None or length < best[0]:
+                best = (length, last_a, j)
 
-    return (width + 10, height)
+    if best is None:
+        return None
 
-
-def draw_text(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str,
-              color: tuple[int, int, int],
-              fonts: list[ImageFont.FreeTypeFont, dict[str, TTFont]],
-              size: int) -> None:
-    for x in text:
-        if ord(x) >= 128:
-            break
-    else:
-        draw.text((xy[0], xy[1] - 7), text, color, fonts[0])  # - 6
-        return
-
-    draw_text_v2(draw, xy, text, color, fonts[1], size)
-
-
-def generate_image(pattern, route_type, BASE_PATH, version1, version2,
-                   shortest_distance,
-                   show: bool = False) -> tuple[Image.Image, str]:
-    '''
-    Generate the image with PIL.
-    '''
-    font_list = [BASE_PATH + x
-                 for x in (
-                    os.sep + 'fonts' + os.sep + "NotoSansSC-Regular.ttf",
-                    os.sep + 'fonts' + os.sep + "NotoSansTC-Regular.ttf",
-                    os.sep + 'fonts' + os.sep + "NotoSansHK-Regular.ttf",
-                    os.sep + 'fonts' + os.sep + "NotoSansJP-Regular.ttf",
-                    os.sep + 'fonts' + os.sep + "NotoSansKR-Regular.ttf",
-                    os.sep + 'fonts' + os.sep + "NotoSansArabic-Regular.ttf",
-                    os.sep + 'fonts' + os.sep +
-                    "NotoSansThaiLooped-Regular.ttf",
-                 )
-                 ]
-    font = ImageFont.FreeTypeFont(font_list[0], 20)
-    fonts = (font, load_fonts(*font_list))
-    gm_full = gmtime(shortest_distance)
-    full_time = str(strftime('%H:%M:%S', gm_full))
-    final_str = f'车站数据版本 Station data version: {version1}'
-    final_str_size = 16
-
-    if int(full_time.split(':', maxsplit=1)[0]) == 0:
-        full_time = ''.join(full_time.split(':', maxsplit=1)[1:])
-
-    image = Image.new('RGB',
-                      calculate_height_width(pattern, route_type,
-                                             final_str, final_str_size,
-                                             BASE_PATH),
-                      color='white')
-    draw = ImageDraw.Draw(image)
-    y = last_y = 10
-    last_colour = ''
-    station_y = []
-    for i, pat in enumerate(pattern):
-        if pat[0] == ImagePattern.OR:
-            draw_text(draw, (30, y), '或', 'black', fonts, 20)
-            draw_text(draw, (30, y + 30), 'or', 'black', fonts, 20)
-            continue
-
-        elif pat[0] == ImagePattern.TEXT:
-            draw_text(draw, (40, y), pat[1], 'black', fonts, 20)
-
-        elif pat[0] == ImagePattern.STATION:
-            draw_text(draw, (40, y), pat[1], 'black', fonts, 20)
-            if i != 1:
-                draw.line(((20, last_y + 10), (20, y)), last_colour, 7)
-            station_y.append(y)
-            last_y = y
-            last_colour = pat[2]
-
-        elif pat[0] == ImagePattern.FAKE_STATION:
-            draw.line(((20, last_y + 10), (20, y + 10)), last_colour, 7)
-            last_y = y
-            last_colour = pat[1]
-            continue
-
-        elif pat[0] == ImagePattern.THUMB_TEXT:
-            image.paste(pat[1], (30, y - 5))
-            if len(pat) > 3:
-                colour = pat[3]
-            else:
-                colour = 'grey'
-
-            draw_text(draw, (60, y), pat[2], colour, fonts, 20)
-
-        elif pat[0] == ImagePattern.THUMB_INDENT_TEXT:
-            image.paste(pat[1], (50, y - 5))
-            if len(pat) > 3:
-                colour = pat[3]
-            else:
-                colour = 'grey'
-
-            draw_text(draw, (80, y), pat[2], colour, fonts, 20)
-
-        elif pat[0] == ImagePattern.GREY_TEXT:
-            draw_text(draw, (35, y), pat[1], 'grey', fonts, 20)
-
-        elif pat[0] == ImagePattern.GREY_INDENT_TEXT:
-            draw_text(draw, (55, y), pat[1], 'grey', fonts, 20)
-
-        y += 30
-
-    for y in station_y:
-        draw.ellipse(((10, y), (30, y + 20)), fill='white',
-                     outline='black', width=3)
-
-    y += 30
-    # Final str
-    draw_text(draw, (40, y), f'总用时 Total Time: {full_time}',
-              'grey', fonts, 20)
-    y += 30
-
-    draw_text(draw, (10, y), f'车站数据版本 Station data version: {version1}',
-              'black', fonts, 16)
-    y += 24
-    draw_text(draw, (10, y), f'路线数据版本 Route data version: {version2}',
-              'black', fonts, 16)
-
-    output_buffer = BytesIO()
-    image.save(output_buffer, 'png')
-    if show is True:
-        image.show()
-
-    byte_data = output_buffer.getvalue()
-    base64_str = base64.b64encode(byte_data).decode('utf-8')
-    return image, base64_str
+    _, i, j = best
+    return i, j
 
 
 def main(station1: str, station2: str, LINK: str,
-         LOCAL_FILE_PATH, DEP_PATH, BASE_PATH, PNG_PATH,
+         LOCAL_FILE_PATH, DEP_PATH,
          MAX_WILD_BLOCKS: int = 1500,
          TRANSFER_ADDITION: Optional[dict[str, list[str]]] = None,
          WILD_ADDITION: Optional[dict[str, list[str]]] = None,
-         STATION_TABLE: Optional[dict[str, str]] = None,
          ORIGINAL_IGNORED_LINES: Optional[list] = None,
          UPDATE_DATA: bool = False,
          GEN_DEPARTURE: bool = False,
@@ -1204,10 +785,9 @@ def main(station1: str, station2: str, LINK: str,
          ONLY_LINES: Optional[list] = None,
          AVOID_STATIONS: Optional[list] = None,
          CALCULATE_HIGH_SPEED: bool = True, CALCULATE_BOAT: bool = True,
-         CALCULATE_WALKING_WILD: bool = False, ONLY_LRT: bool = False,
-         DETAIL: bool = False, MAX_HOUR=3, timetable=None, gen_image=True,
-         show=False, departure_time=None, tz=0, timeout_min=2,
-         need_input=True) -> Union[tuple[Image.Image, str], bool, None]:
+         CALCULATE_WALKING_WILD: bool = False, ONLY_LRT: bool = False, INCLUDE_HIDDEN_ROUTES: bool = False,
+         DETAIL: bool = False, MAX_HOUR=3, timetable=None, departure_time=None, tz=0, timeout_min=2,
+         need_input=True):
     '''
     Find the shortest path between two stations.
     Args:
@@ -1216,12 +796,9 @@ def main(station1: str, station2: str, LINK: str,
         link (`str`): The url of the Transport System Map.
         LOCAL_FILE_PATH (`str`): stations-and-routes data file path.
         DEP_PATH (`str`): departures data file path.
-        BASE_PATH (`str`): Font path. (.../BASE_PATH/fonts/...)
-        PNG_PATH (`str`): The path of the generated image.
         MAX_WILD_BLOCKS (`int`, optional): The maximum distance of walking outside of the station areas.
         TRANSFER_ADDITION (`dict`, optional): Add out-of-station transfer options between these stations. "{station1: [station2, station3, ...], ...}"
         WILD_ADDITION (`dict`, optional): Add walk options between these stations, regardless of MAX_WILD_BLOCKS. "{station1: [station2, station3, ...], ...}"
-        STATION_TABLE (`dict`, optional): Station nickname table. "{Nickname: Actual name, ...}"
         ORIGINAL_IGNORED_LINES (`list`, optional): Ignore these routes globally.
         UPDATE_DATA (`bool`, optional): Update stations-and-routes data.
         GEN_DEPARTURE (`bool`, optional): Generate the departure of all routes.
@@ -1267,8 +844,6 @@ def main(station1: str, station2: str, LINK: str,
         TRANSFER_ADDITION = {}
     if WILD_ADDITION is None:
         WILD_ADDITION = {}
-    if STATION_TABLE is None:
-        STATION_TABLE = {}
     if ORIGINAL_IGNORED_LINES is None:
         ORIGINAL_IGNORED_LINES = []
     if IGNORED_LINES is None:
@@ -1279,7 +854,6 @@ def main(station1: str, station2: str, LINK: str,
         AVOID_STATIONS = []
 
     IGNORED_LINES += ORIGINAL_IGNORED_LINES
-    STATION_TABLE = {x.lower(): y.lower() for x, y in STATION_TABLE.items()}
     if LINK.endswith('/index.html'):
         LINK = LINK.rstrip('/index.html')
 
@@ -1291,6 +865,15 @@ def main(station1: str, station2: str, LINK: str,
     else:
         with open(LOCAL_FILE_PATH, encoding='utf-8') as f:
             data = json.load(f)
+
+    new_ignored_lines = []
+    new_original_ignored_lines = []
+    for route_id, route in data['routes'].items():
+        route_key = f"{route['color']}_{route['name'].split('||')[0]}_{route['number']}"
+        if route_key not in ONLY_LINES and (route_key in IGNORED_LINES or (route['hidden'] and not INCLUDE_HIDDEN_ROUTES)):
+            new_ignored_lines.append(route_id)
+        if route_key in ORIGINAL_IGNORED_LINES or route['hidden']:
+            new_original_ignored_lines.append(route_id)
 
     if GEN_DEPARTURE is True or (not os.path.exists(DEP_PATH)):
         if LINK == '':
@@ -1310,54 +893,42 @@ def main(station1: str, station2: str, LINK: str,
             CALCULATE_HIGH_SPEED, CALCULATE_BOAT, CALCULATE_WALKING_WILD,
             ONLY_LRT, AVOID_STATIONS, route_type, ORIGINAL_IGNORED_LINES,
             DEP_PATH, version1, version2,
-            STATION_TABLE, WILD_ADDITION, TRANSFER_ADDITION)
+            WILD_ADDITION, TRANSFER_ADDITION)
 
     tt, trips = load_tt(timetable, data, station1, station2, departure_time,
-                        DEP_PATH, STATION_TABLE, TRANSFER_ADDITION,
+                        DEP_PATH, TRANSFER_ADDITION,
                         CALCULATE_WALKING_WILD, WILD_ADDITION, MAX_HOUR)
 
     csa = CSA(len(data['stations']), tt, timeout_min)
-    s1 = station_name_to_id(data, station1, STATION_TABLE)
-    s2 = station_name_to_id(data, station2, STATION_TABLE)
-    if s1 is None or s2 is None:
-        return None
+    if station1 is None or station2 is None:
+        return []
 
-    s1 = int('0x' + data['stations'][s1]['station'], 16)
-    s2 = int('0x' + data['stations'][s2]['station'], 16)
-    result = csa.compute(s1, s2, departure_time)
+    station1 = int('0x' + data['stations'][station1]['station'], 16)
+    station2 = int('0x' + data['stations'][station2]['station'], 16)
+    result = csa.compute(station1, station2, departure_time)
     if result == []:
-        return False
+        return []
 
     ert = process_path(result, station1, station2, trips,
-                       data, DETAIL, STATION_TABLE)
+                       data, DETAIL)
 
-    if gen_image is False:
-        return ert
-
-    if ert[0] in [False, None]:
-        return ert[0]
-
-    return save_image(route_type, ert, BASE_PATH, version1, version2,
-                      PNG_PATH, departure_time, show)
+    return ert
 
 
 def run():
     # 地图设置
     # 在线线路图网址，结尾删除"/"
-    LINK: str = ''
+    LINK: str = 'https://lps.gteh.top'
     # 旅途的最长时间，默认值为3
     MAX_HOUR: int = 3
     # 从A站到B站，非出站换乘（越野）的最远步行距离，默认值为1500
     MAX_WILD_BLOCKS: int = 1500
     # 手动增加出站换乘
     # "车站: [出站换乘的车站, ...], ..."
-    TRANSFER_ADDITION: dict[str, list[str]] = {}
+    TRANSFER_ADDITION: dict[str, list[str]] = {"6C779DAE0A5090BF": ["E918CA5DCB128E39", "B250C507ABBCEBF9"]}
     # 手动增加非出站换乘（越野）
     # "车站: [非出站换乘的车站, ...], ..."
     WILD_ADDITION: dict[str, list[str]] = {}
-    # 车站名称映射
-    # "车站昵称: 车站实际名称, ..."
-    STATION_TABLE: dict[str, str] = {}
     # 禁止乘坐的路线（未开通的路线）
     ORIGINAL_IGNORED_LINES: list = []
 
@@ -1365,13 +936,11 @@ def run():
     link_hash = hashlib.md5(LINK.encode('utf-8')).hexdigest()
     LOCAL_FILE_PATH = f'mtr-original-data-{link_hash}-mtr4-v4.json'
     DEP_PATH = f'mtr-route-departure-{link_hash}-mtr4-v4.json'
-    BASE_PATH = 'mtr_pathfinder_data'
-    PNG_PATH = 'mtr_pathfinder_data'
 
     # 是否更新车站数据
-    UPDATE_DATA: bool = False
+    UPDATE_DATA: bool = True
     # 是否更新路线数据
-    GEN_DEPARTURE: bool = False
+    GEN_DEPARTURE: bool = True
 
     # 寻路设置
     # 避开的路线
@@ -1388,6 +957,7 @@ def run():
     CALCULATE_WALKING_WILD: bool = False
     # 仅允许轻轨，默认值为False
     ONLY_LRT: bool = False
+    INCLUDE_HIDDEN_ROUTES: bool = False
 
     # 出发时间（秒，0-86400），默认值为None，即当前时间后10秒
     DEP_TIME = None
@@ -1395,16 +965,15 @@ def run():
     DETAIL: bool = False
 
     # 出发、到达车站
-    station1 = ''
-    station2 = ''
+    station1 = '6A3F938669582F91'
+    station2 = '0F92228EB5D81A77'
 
-    main(station1, station2, LINK, LOCAL_FILE_PATH, DEP_PATH,
-         BASE_PATH, PNG_PATH, MAX_WILD_BLOCKS,
-         TRANSFER_ADDITION, WILD_ADDITION, STATION_TABLE,
+    print(main(station1, station2, LINK, LOCAL_FILE_PATH, DEP_PATH,
+         MAX_WILD_BLOCKS,
+         TRANSFER_ADDITION, WILD_ADDITION,
          ORIGINAL_IGNORED_LINES, UPDATE_DATA, GEN_DEPARTURE,
          IGNORED_LINES, ONLY_LINES, AVOID_STATIONS, CALCULATE_HIGH_SPEED,
-         CALCULATE_BOAT, CALCULATE_WALKING_WILD, ONLY_LRT, DETAIL, MAX_HOUR,
-         show=True, departure_time=DEP_TIME)
+         CALCULATE_BOAT, CALCULATE_WALKING_WILD, ONLY_LRT, INCLUDE_HIDDEN_ROUTES, DETAIL, MAX_HOUR, departure_time=DEP_TIME))
 
 
 if __name__ == '__main__':
